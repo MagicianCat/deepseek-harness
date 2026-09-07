@@ -464,6 +464,22 @@ importers:
         specifier: 8.21.0
         version: 8.21.0
 
+  apps/skill-platform-runtime:
+    dependencies:
+      '@deepseek-ai/dsh-sdk-client':
+        specifier: workspace:^
+        version: link:../../packages/sdk/client
+    devDependencies:
+      '@types/node':
+        specifier: ^22.20.0
+        version: 22.20.0
+      tsx:
+        specifier: ^4.22.4
+        version: 4.22.4
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+
   apps/web:
     devDependencies:
       '@deepseek-ai/cordis-plugin-group':

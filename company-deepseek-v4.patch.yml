@@ -1,0 +1,39 @@
+# Local deployment patch for the company's DeepSeek V4 gateway.
+# The API key is intentionally read from DEEPSEEK_API_KEY at runtime and is
+# never stored in this file.
+
+- id: llm-deepseek
+  config:
+    baseURL: https://tkcopilot.taikang.com/v1/deepseek
+    apiKeyEnv: DEEPSEEK_API_KEY
+    models:
+      - id: deepseek-v4-pro
+        name: Company DeepSeek V4 Pro
+        description: Company DeepSeek V4 Pro gateway route.
+        contextWindow: 1000000
+        inputModalities: [text]
+    reasoningEffort: high
+    maxTokens: 4096
+
+- insert:
+    - id: agent-default-model-company
+      name: '@deepseek-ai/dsh-agent-default-model'
+      config:
+        provider: deepseek-official
+        model: deepseek-v4-pro
+
+    - id: mcp-skill-platform
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: skill_platform
+        transport: streamable-http
+        url: http://127.0.0.1:8090/internal/mcp
+        headers:
+          Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
+        toolCallTimeoutMs: 60000
+        failOnStartupError: true
+        reconnect:
+          enabled: true
+          initialDelayMs: 500
+          maxDelayMs: 30000
+          maxAttempts: 10
