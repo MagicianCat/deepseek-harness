@@ -6,7 +6,10 @@
     apiKeyEnv: DEEPSEEK_API_KEY
     defaultContextWindow: 1000000
     reasoningEffort: high
-    maxTokens: 4096
+    maxTokens: !!js Number(process.env.DSH_MAX_TOKENS ?? 16384)
+    retryPolicy:
+      mode: normal
+      maxRetries: 1
 
 - id: persistent-bash
   disabled: true
