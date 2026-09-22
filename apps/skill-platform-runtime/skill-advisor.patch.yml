@@ -5,7 +5,7 @@
     baseURL: !!js process.env.DEEPSEEK_BASE_URL ?? 'https://tkcopilot.taikang.com/v1/deepseek'
     apiKeyEnv: DEEPSEEK_API_KEY
     defaultContextWindow: 1000000
-    reasoningEffort: high
+    reasoningEffort: !!js process.env.DSH_REASONING_EFFORT ?? 'high'
     maxTokens: !!js Number(process.env.DSH_MAX_TOKENS ?? 16384)
     retryPolicy:
       mode: normal
@@ -30,6 +30,10 @@
         headers:
           Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
         toolCallTimeoutMs: 60000
-        failOnStartupError: true
+        # A run-scoped token can expire between the frontend request and the
+        # child runtime startup. Keep the agent context alive so the MCP
+        # client reports an unavailable tool and the runtime can recover or
+        # return a useful answer instead of failing during plugin mounting.
+        failOnStartupError: false
         reconnect:
           enabled: false

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DeepSeekHarness, type HarnessNotification } from '@deepseek-ai/dsh-sdk-client'
+import { normalizeToolArguments } from './tool-arguments.js'
 
 type RunStatus = 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
 type Role = 'USER' | 'ASSISTANT'
@@ -133,6 +134,9 @@ async function execute(run: RuntimeRun, request: CreateRunRequest): Promise<void
     HTTP_PROXY: process.env.HTTP_PROXY,
     HTTPS_PROXY: process.env.HTTPS_PROXY,
     NO_PROXY: process.env.NO_PROXY,
+    DSH_REASONING_EFFORT: supportedReasoningEffort(process.env.DSH_REASONING_EFFORT),
+    DSH_HISTORY_MAX_MESSAGES: process.env.DSH_HISTORY_MAX_MESSAGES,
+    DSH_HISTORY_MAX_CHARS: process.env.DSH_HISTORY_MAX_CHARS,
   }
   const harness = new DeepSeekHarness({
     profile: 'sdk-minimal',
@@ -194,6 +198,7 @@ async function execute(run: RuntimeRun, request: CreateRunRequest): Promise<void
         toolCalls: run.toolCalls.length,
         feishuSearches: run.toolCalls.filter(call => toolIs(call.name, 'search_feishu_documents')).length,
         feishuReads: run.toolCalls.filter(call => toolIs(call.name, 'get_feishu_document')).length,
+        knowledgeSearches: run.toolCalls.filter(call => toolIs(call.name, 'search_knowledge')).length,
       })
     }
   } catch (error) {
@@ -201,7 +206,7 @@ async function execute(run: RuntimeRun, request: CreateRunRequest): Promise<void
       run.status = 'FAILED'
       run.error = safeError(error)
       emit(run, 'runtime.failed', { runtimeRunId: run.id, code: 'RUNTIME_ERROR', message: run.error })
-      log('run.failed', { runId: run.id, code: 'RUNTIME_ERROR', message: run.error })
+      log('run.failed', { runId: run.id, code: 'RUNTIME_ERROR', message: run.error, stack: safeStack(error) })
     }
   } finally {
     clearTimeout(timer)
@@ -222,14 +227,17 @@ function projectNotification(run: RuntimeRun, notification: HarnessNotification)
     }
   } else if (event?.type === 'tool/call') {
     const toolName = String(event.data?.name ?? '')
+    const argumentsValue = event.data?.arguments
+    const normalizedArguments = normalizeToolArguments(argumentsValue)
     run.toolCalls.push({
       name: toolName,
-      arguments: isRecord(event.data?.arguments) ? event.data.arguments : {},
+      arguments: normalizedArguments,
     })
     if (toolIs(toolName, 'get_current_user_context')) setPhase(run, 'CONTEXT', '正在确认你的团队和知识权限')
+    else if (toolIs(toolName, 'search_knowledge')) setPhase(run, 'SEARCHING_KNOWLEDGE', '正在检索相关研发知识')
     else if (toolIs(toolName, 'search_feishu_documents')) setPhase(run, 'SEARCHING_DOCUMENTS', '正在检索相关飞书文档')
     else if (toolIs(toolName, 'get_feishu_document')) setPhase(run, 'READING_DOCUMENTS', '正在读取可访问的业务资料')
-    emit(run, 'tool.started', { callId: event.data?.callId, toolName: event.data?.name, arguments: event.data?.arguments })
+    emit(run, 'tool.started', { callId: event.data?.callId, toolName: event.data?.name, arguments: normalizedArguments })
   } else if (event?.type === 'tool/result') {
     const message = event.data?.message as {
       toolCallId?: string
@@ -333,7 +341,7 @@ async function cleanup(run: RuntimeRun): Promise<void> {
 }
 
 function conversationPrompt(request: CreateRunRequest): string {
-  const previous = request.messages.slice(0, -1).map(message => `${message.role}: ${message.content}`).join('\n\n')
+  const previous = boundedHistory(request.messages.slice(0, -1))
   const current = request.messages.at(-1)?.content ?? ''
   const platform = request.platform || '未选择'
   const osType = request.osType || '未选择'
@@ -346,19 +354,34 @@ function conversationPrompt(request: CreateRunRequest): string {
     : `${trusted}\n\n当前用户需求：\n${current}`
 }
 
+function boundedHistory(messages: CreateRunRequest['messages']): string {
+  const maxMessages = positiveInteger(process.env.DSH_HISTORY_MAX_MESSAGES, 8)
+  const maxChars = positiveInteger(process.env.DSH_HISTORY_MAX_CHARS, 16_000)
+  const selected: string[] = []
+  let remaining = maxChars
+  for (const message of messages.slice(-maxMessages).reverse()) {
+    const rendered = `${message.role}: ${message.content}`
+    if (remaining <= 0) break
+    const bounded = rendered.length <= remaining ? rendered : rendered.slice(rendered.length - remaining)
+    selected.push(bounded)
+    remaining -= bounded.length + 2
+  }
+  return selected.reverse().join('\n\n')
+}
+
 function recoveryPrompt(request: CreateRunRequest): string {
   const current = request.messages.at(-1)?.content ?? ''
-  return `上一轮已经完成必要的 MCP 检索，但没有生成可见正文。请不要重新进行无关搜索；基于已获得的团队、Wiki 和 Skill 结果继续完成用户请求“${current}”。如推荐 Skill 尚未提交，先调用 submit_skill_recommendation（最多 20 项）；然后立即输出简洁中文最终答案。若结果超过 20 项，明确说明当前接口上限及已返回的前 20 项。`
+  return `上一轮已经完成必要的 MCP 检索，但没有生成可见正文。请不要重新进行无关搜索；基于已获得的团队、知识片段、Wiki 和 Skill 结果继续完成用户请求“${current}”。如推荐 Skill 尚未提交，先调用 submit_skill_recommendation（最多 20 项）；然后立即输出简洁中文最终答案。若结果超过 20 项，明确说明当前接口上限及已返回的前 20 项。`
 }
 
 function skillAdvisorPrompt(): string {
   return [
     '你是研途助手，定位是公司的研发全流程助手。不得编造公司事实、Skill、文档或链接，无法确认时必须明确说明。',
     '每一轮都必须先调用 get_current_user_context，识别当前用户有权访问的团队；不得根据用户自述或历史消息猜测团队。若返回多个团队，对每个团队分别检索；若没有团队，明确按平台公共知识处理。',
-    '推荐 Skill 时，先使用 teamId 调用 search_wiki_documents 检索当前团队 Wiki，再读取与需求相关的 Wiki。团队 Wiki 明确推荐或关联的 Skill 是最高优先级候选；不得读取或推荐其他团队的私有内容。',
-    '识别用户是否处于研发大阶段：REQUIREMENT、PRODUCT、ARCHITECTURE_DESIGN、UI_DESIGN、BACKEND_CODING、FRONTEND_CODING、SECURITY_REVIEW、TESTING、DEPLOYMENT。识别到阶段后，必须以关键词“研发全流程最佳实践”检索 Wiki并读取命中文档，同时将 developmentStage 传给 search_skills。排序依次为：同时符合当前团队 Wiki 与当前阶段最佳实践的 Skill、当前阶段最佳实践 Skill、其他当前团队 Wiki Skill、其他平台 Skill。',
+    '推荐 Skill 时，第二步优先调用 search_knowledge，query 必须使用用户当前完整需求；不得向工具传递或猜测 teamId。结果中的团队 Wiki linkedSkills 是最高优先级候选，其次是平台 Wiki linkedSkills；不得读取或推荐其他团队的私有内容。',
+    '识别用户是否处于研发大阶段：REQUIREMENT、PRODUCT、ARCHITECTURE_DESIGN、UI_DESIGN、BACKEND_CODING、FRONTEND_CODING、SECURITY_REVIEW、TESTING、DEPLOYMENT。识别到阶段后，必须把准确 developmentStage 传给 search_knowledge。“研发全流程最佳实践”及阶段 Skill 优先从知识检索结果判断；只有 search_knowledge 无结果或 retrieverUnavailable=true 时，才回退 search_wiki_documents 与 search_skills。',
     '用户要求“全部 Skill”时，只检索和推荐首批最多 20 个结果；根据 search_skills 返回的 total 判断是否截断，并在最终回答中明确说明剩余数量或平台上限，不要无限翻页或逐个读取所有 Skill。',
-    '只能推荐 MCP 返回且当前用户有权访问的 Skill。对最终候选调用 get_skill_detail，结合 Skill.md 和可见 Wiki 生成贴合用户场景的 usageExample，并在回答前调用 submit_skill_recommendation。',
+    '只能推荐 MCP 返回且当前用户有权访问的 Skill。search_knowledge 的 snippets 和 linkedSkills 足够时，不得重复调用 search_wiki_documents、search_skills 或逐个 get_skill_detail；可以直接生成贴合场景的 usageExample。仅当用户询问具体安装、参数、步骤，或片段不足以形成准确示例时，读取必要的 get_wiki_document 或 get_skill_detail。回答前必须调用 submit_skill_recommendation。',
     '当问题涉及保险产品、承保、核保、理赔、保全、精算、再保险、代理人、渠道、合规或其他保险业务概念时，必须在形成答案前优先调用 search_feishu_documents，并仅对返回 readable=true 的结果调用 get_feishu_document，传入原结果中的 docId 和 docType。DOCX 使用飞书 MCP，DOC 使用旧版 Docs API；SHEET、BITABLE、SLIDES、MINDNOTE、WIKI、UNKNOWN 等 readable=false 类型不得调用读取工具，只能提供可访问链接。保险问题最多搜索 3 次、尝试读取 5 个不同文档；同一 docId 不得重复读取，UNSUPPORTED_DOCUMENT_TYPE 及其他确定性4xx不得重试，只有网络超时、429或5xx允许有限重试。答案中的业务事实必须在相关结论附近标注“来源：文档标题（可访问链接）”；工具未返回链接时标注文档标题和 docId，绝不能虚构链接。若无结果或无权限，明确说明未检索到有权限的资料，不用通用知识冒充公司口径。',
     '非保险类公司内部业务问题也必须查飞书文档；通用研发基础问题可以使用已有知识回答，但不确定时说明不确定。',
     '每轮输入开头的“可信会话筛选”是后端解析出的最终 platform/osType，优先于历史消息，并原样用于 search_skills 和推荐项。使用 MCP 返回的 detailPath 作为 Skill 详情链接。',
@@ -374,10 +397,11 @@ function validateToolPolicy(run: RuntimeRun, request: CreateRunRequest, answer: 
   const current = request.messages.at(-1)?.content ?? ''
   const stage = developmentStage(current)
   if (stage) {
+    const searchedKnowledge = run.toolCalls.some(call => toolIs(call.name, 'search_knowledge') && call.arguments.developmentStage === stage)
     const searchedPractice = run.toolCalls.some(call => toolIs(call.name, 'search_wiki_documents') && call.arguments.keyword === '研发全流程最佳实践')
     const searchedStage = run.toolCalls.some(call => toolIs(call.name, 'search_skills') && call.arguments.developmentStage === stage)
-    if (!searchedPractice || !searchedStage) {
-      return { code: 'DEVELOPMENT_STAGE_EVIDENCE_REQUIRED', message: 'Agent did not consult the development best-practice Wiki and stage-specific skills' }
+    if (!searchedKnowledge && (!searchedPractice || !searchedStage)) {
+      return { code: 'DEVELOPMENT_STAGE_EVIDENCE_REQUIRED', message: 'Agent did not consult stage-specific knowledge or the legacy fallback sources' }
     }
   }
   if (insuranceIntent(current)) {
@@ -407,10 +431,6 @@ function insuranceIntent(text: string): boolean {
 
 function toolIs(actual: string, expected: string): boolean {
   return actual === expected || actual.endsWith(`__${expected}`) || actual.endsWith(`/${expected}`)
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 function validateCreateRun(value: unknown): CreateRunRequest {
@@ -475,6 +495,10 @@ function positiveInteger(value: string | undefined, fallback: number): number {
   return parsed
 }
 
+function supportedReasoningEffort(value: string | undefined): 'off' | 'low' | 'high' | 'max' {
+  return value === 'off' || value === 'low' || value === 'high' || value === 'max' ? value : 'high'
+}
+
 function requiredEnv(name: string): string {
   const value = process.env[name]
   if (!value) throw new Error(`${name} is required`)
@@ -488,6 +512,11 @@ function safeError(error: unknown): string {
     .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
     .replace(key ? escapeRegExp(key) : /$^/, '[REDACTED]')
     .slice(0, 500)
+}
+
+function safeStack(error: unknown): string | undefined {
+  if (!(error instanceof Error) || !error.stack) return undefined
+  return safeError(error.stack)
 }
 
 function log(event: string, fields: Record<string, unknown>): void {

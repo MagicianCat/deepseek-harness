@@ -1,5 +1,7 @@
 # Skill Platform DSH Runtime
 
+English | [中文](README.zh.md)
+
 Internal HTTP/SSE adapter that runs one isolated `sdk-minimal` DSH child per
 Skill recommendation run. It is not browser-facing.
 
@@ -8,6 +10,9 @@ DSH_SERVICE_TOKEN='local-service-token' \
 DEEPSEEK_API_KEY='from-secret-store' \
 SKILL_PLATFORM_MCP_URL='http://127.0.0.1:8090/internal/mcp' \
 DSH_MAX_TOKENS='16384' \
+DSH_REASONING_EFFORT='high' \
+DSH_HISTORY_MAX_MESSAGES='8' \
+DSH_HISTORY_MAX_CHARS='16000' \
 pnpm --filter @company/skill-platform-dsh-runtime dev
 ```
 
@@ -30,10 +35,19 @@ Skill search and structured recommendation are bounded to 20 items by the
 platform MCP contract. Requests for all matching skills must report when the
 result set is truncated instead of paging indefinitely.
 
+The runtime asks the platform MCP to search authorized Wiki knowledge before
+broad Wiki or Skill searches. Knowledge results include bounded snippets and
+linked Skill summaries; full Wiki and Skill files remain fallback reads.
+
 The runtime also enforces evidence gates: every turn starts with current-team
-discovery, development-stage requests must consult the `研发全流程最佳实践`
-Wiki and stage-filtered skills, and insurance answers must read Feishu source
-documents and include a `来源：` citation.
+discovery, development-stage requests must consult stage-qualified knowledge or
+the legacy best-practice Wiki and stage-filtered Skill fallback, and insurance
+answers must read Feishu source documents and include a `来源：` citation.
+
+Conversation history defaults to the latest eight messages and 16,000
+characters. Skill Advisor reasoning defaults to `high` (supported values are
+`off`, `low`, `high`, and `max`); both limits and the
+reasoning effort are configurable through the environment shown above.
 
 Feishu MCP failures are treated as recoverable tool results. The platform
 backend performs bounded retries for transient upstream failures and returns
