@@ -35,14 +35,17 @@ Skill search and structured recommendation are bounded to 20 items by the
 platform MCP contract. Requests for all matching skills must report when the
 result set is truncated instead of paging indefinitely.
 
-The runtime asks the platform MCP to search authorized Wiki knowledge before
-broad Wiki or Skill searches. Knowledge results include bounded snippets and
-linked Skill summaries; full Wiki and Skill files remain fallback reads.
+The runtime asks the platform MCP to search authorized Wiki knowledge for Skill
+and non-Skill questions before consulting Feishu documents. Knowledge results
+include bounded snippets, linked Skill summaries, and the Wiki's original and
+Markdown download links. Full Wiki and Skill files remain fallback reads.
 
 The runtime also enforces evidence gates: every turn starts with current-team
 discovery, development-stage requests must consult stage-qualified knowledge or
-the legacy best-practice Wiki and stage-filtered Skill fallback, and insurance
-answers must read Feishu source documents and include a `来源：` citation.
+the legacy best-practice Wiki and stage-filtered Skill fallback. Insurance
+answers must search authorized platform knowledge first and cite any Wiki or
+Feishu document used. Wiki citations include both original and download links;
+Feishu citations include the document link only.
 
 Conversation history defaults to the latest eight messages and 16,000
 characters. Skill Advisor reasoning defaults to `high` (supported values are
