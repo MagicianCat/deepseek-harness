@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+.git
+**/.git
+.agents
+.github
+dist
+**/dist
+coverage
+**/coverage
+*.tsbuildinfo
+.env
+.env.*

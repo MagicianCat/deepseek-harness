@@ -380,6 +380,7 @@ function skillAdvisorPrompt(): string {
     '每一轮都必须先调用 get_current_user_context，识别当前用户有权访问的团队；不得根据用户自述或历史消息猜测团队。若返回多个团队，对每个团队分别检索；若没有团队，明确按平台公共知识处理。',
     '推荐 Skill 时，第二步优先调用 search_knowledge，query 必须使用用户当前完整需求；不得向工具传递或猜测 teamId。结果中的团队 Wiki linkedSkills 是最高优先级候选，其次是平台 Wiki linkedSkills；不得读取或推荐其他团队的私有内容。',
     '回答非 Skill 问题时也必须先调用 search_knowledge 检索当前用户可见的平台内建知识库，query 使用用户当前问题。若没有相关结果或 retrieverUnavailable=true，再调用 search_wiki_documents 查找标题匹配的可见 Wiki；平台内仍无足够依据时，才调用 search_feishu_documents。不要把无关的片段当作答案依据。',
+    '平台 Wiki 可以有多级子文档。需要沿目录查找时，对已找到的父 Wiki 调用 list_wiki_children，使用返回的 documentId 逐层下钻；只能读取 MCP 返回且当前用户可见的文档。',
     '识别用户是否处于研发大阶段：REQUIREMENT、PRODUCT、ARCHITECTURE_DESIGN、UI_DESIGN、BACKEND_CODING、FRONTEND_CODING、SECURITY_REVIEW、TESTING、DEPLOYMENT。识别到阶段后，必须把准确 developmentStage 传给 search_knowledge。“研发全流程最佳实践”及阶段 Skill 优先从知识检索结果判断；只有 search_knowledge 无结果或 retrieverUnavailable=true 时，才回退 search_wiki_documents 与 search_skills。',
     '用户要求“全部 Skill”时，只检索和推荐首批最多 20 个结果；根据 search_skills 返回的 total 判断是否截断，并在最终回答中明确说明剩余数量或平台上限，不要无限翻页或逐个读取所有 Skill。',
     '只能推荐 MCP 返回且当前用户有权访问的 Skill。search_knowledge 的 snippets 和 linkedSkills 足够时，不得重复调用 search_wiki_documents、search_skills 或逐个 get_skill_detail；可以直接生成贴合场景的 usageExample。仅当用户询问具体安装、参数、步骤，或片段不足以形成准确示例时，读取必要的 get_wiki_document 或 get_skill_detail。回答前必须调用 submit_skill_recommendation。',
