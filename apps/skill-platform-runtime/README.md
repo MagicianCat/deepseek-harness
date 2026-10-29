@@ -38,7 +38,10 @@ result set is truncated instead of paging indefinitely.
 The runtime asks the platform MCP to search authorized Wiki knowledge for Skill
 and non-Skill questions before consulting Feishu documents. Knowledge results
 include bounded snippets, linked Skill summaries, and the Wiki's original and
-Markdown download links. Full Wiki and Skill files remain fallback reads.
+Markdown download links. Matched parent Wiki results also include a bounded,
+permission-filtered descendant directory. The assistant checks this directory
+before answering from a parent and reads only relevant child bodies. Full Wiki
+and Skill files remain fallback reads.
 
 The runtime also enforces evidence gates: every turn starts with current-team
 discovery, development-stage requests must consult stage-qualified knowledge or
