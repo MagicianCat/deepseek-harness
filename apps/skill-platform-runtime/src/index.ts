@@ -55,7 +55,7 @@ interface RuntimeRun {
 }
 
 const port = positiveInteger(process.env.PORT, 3090)
-const maxConcurrent = positiveInteger(process.env.DSH_MAX_CONCURRENT_RUNS, 4)
+const maxConcurrent = positiveInteger(process.env.DSH_MAX_CONCURRENT_RUNS, 8)
 const runTimeoutMs = positiveInteger(process.env.DSH_RUN_TIMEOUT_MS, 240_000)
 const noProgressTimeoutMs = positiveInteger(process.env.DSH_NO_PROGRESS_TIMEOUT_MS, 90_000)
 const retentionMs = positiveInteger(process.env.DSH_RUN_RETENTION_MS, 600_000)
@@ -66,16 +66,17 @@ requiredEnv('SKILL_PLATFORM_MCP_URL')
 const here = dirname(fileURLToPath(import.meta.url))
 const patchPath = resolve(here, '../skill-advisor.patch.yml')
 const runs = new Map<string, RuntimeRun>()
+let busyRejections = 0
 
 const server = createServer(async (request, response) => {
   try {
     if (request.url === '/healthz' && request.method === 'GET') {
-      return json(response, 200, { status: 'UP', activeRuns: activeRuns() })
+      return json(response, 200, { status: 'UP', activeRuns: activeRuns(), maxConcurrentRuns: maxConcurrent, availableSlots: Math.max(0, maxConcurrent - activeRuns()), busyRejections })
     }
     if (!authorized(request.headers.authorization)) return json(response, 401, { code: 'UNAUTHORIZED' })
     const url = new URL(request.url ?? '/', 'http://runtime.internal')
     if (url.pathname === '/internal/v1/runs' && request.method === 'POST') {
-      if (activeRuns() >= maxConcurrent) return json(response, 429, { code: 'RUNTIME_BUSY' })
+      if (activeRuns() >= maxConcurrent) {busyRejections += 1;log('run.rejected',{ code:'RUNTIME_BUSY',activeRuns:activeRuns(),maxConcurrent });return json(response, 429, { code: 'RUNTIME_BUSY' })}
       const body = validateCreateRun(await readJson(request))
       if (runs.has(body.runId)) return json(response, 409, { code: 'RUN_ALREADY_EXISTS' })
       const run: RuntimeRun = {
@@ -130,47 +131,52 @@ async function execute(run: RuntimeRun, request: CreateRunRequest): Promise<void
   run.status = 'RUNNING'
   emit(run, 'runtime.started', { runtimeRunId: run.id })
   log('run.started', { runId: run.id, sessionId: request.sessionId })
-  const tempRoot = await mkdtemp(resolve(tmpdir(), 'skill-platform-dsh-'))
-  run.tempRoot = tempRoot
-  await mkdir(resolve(tempRoot, 'workspace'))
-  const childEnv: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
-    DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL,
-    SKILL_PLATFORM_MCP_URL: process.env.SKILL_PLATFORM_MCP_URL,
-    MCP_TOKEN: request.mcpToken,
-    DSH_SYSTEM_PROMPT: buildIntentPrompt(request.intentPlan),
-    DSH_TELEMETRY_DISABLED: '1',
-    NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY,
-    HTTP_PROXY: process.env.HTTP_PROXY,
-    HTTPS_PROXY: process.env.HTTPS_PROXY,
-    NO_PROXY: process.env.NO_PROXY,
-    DSH_REASONING_EFFORT: supportedReasoningEffort(process.env.DSH_REASONING_EFFORT),
-    DSH_HISTORY_MAX_MESSAGES: process.env.DSH_HISTORY_MAX_MESSAGES,
-    DSH_HISTORY_MAX_CHARS: process.env.DSH_HISTORY_MAX_CHARS,
-  }
-  const harness = new DeepSeekHarness({
-    profile: 'sdk-minimal',
-    patches: [patchPath],
-    dshHome: resolve(tempRoot, 'home'),
-    processCwd: resolve(tempRoot, 'workspace'),
-    cwd: resolve(tempRoot, 'workspace'),
-    provider: 'deepseek-official',
-    model: process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
-    maxTokens: positiveInteger(process.env.DSH_MAX_TOKENS, 16384),
-    env: childEnv,
-    requestTimeoutMs: runTimeoutMs,
-  })
-  run.harness = harness
-  const timer = setTimeout(() => void failAndClose(run, 'RUNTIME_TIMEOUT'), runTimeoutMs)
-  timer.unref()
-  const progressTimer = setInterval(() => {
-    if (isActive(run.status) && Date.now() - run.lastProgressAt >= noProgressTimeoutMs) {
-      void failAndClose(run, 'MODEL_NO_PROGRESS')
-    }
-  }, 1000)
-  progressTimer.unref()
+  let timer: NodeJS.Timeout | undefined
+  let progressTimer: NodeJS.Timeout | undefined
   try {
+    const tempRoot = await mkdtemp(resolve(tmpdir(), 'skill-platform-dsh-'))
+    run.tempRoot = tempRoot
+    if (!isActive(run.status)) return
+    await mkdir(resolve(tempRoot, 'workspace'))
+    if (!isActive(run.status)) return
+    const childEnv: NodeJS.ProcessEnv = {
+      PATH: process.env.PATH,
+      DEEPSEEK_API_KEY: process.env.DEEPSEEK_API_KEY,
+      DEEPSEEK_BASE_URL: process.env.DEEPSEEK_BASE_URL,
+      SKILL_PLATFORM_MCP_URL: process.env.SKILL_PLATFORM_MCP_URL,
+      MCP_TOKEN: request.mcpToken,
+      DSH_SYSTEM_PROMPT: buildIntentPrompt(request.intentPlan),
+      DSH_TELEMETRY_DISABLED: '1',
+      NODE_USE_ENV_PROXY: process.env.NODE_USE_ENV_PROXY,
+      HTTP_PROXY: process.env.HTTP_PROXY,
+      HTTPS_PROXY: process.env.HTTPS_PROXY,
+      NO_PROXY: process.env.NO_PROXY,
+      DSH_REASONING_EFFORT: supportedReasoningEffort(process.env.DSH_REASONING_EFFORT),
+      DSH_HISTORY_MAX_MESSAGES: process.env.DSH_HISTORY_MAX_MESSAGES,
+      DSH_HISTORY_MAX_CHARS: process.env.DSH_HISTORY_MAX_CHARS,
+    }
+    const harness = new DeepSeekHarness({
+      profile: 'sdk-minimal',
+      patches: [patchPath],
+      dshHome: resolve(tempRoot, 'home'),
+      processCwd: resolve(tempRoot, 'workspace'),
+      cwd: resolve(tempRoot, 'workspace'),
+      provider: 'deepseek-official',
+      model: process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro',
+      maxTokens: positiveInteger(process.env.DSH_MAX_TOKENS, 16384),
+      env: childEnv,
+      requestTimeoutMs: runTimeoutMs,
+    })
+    run.harness = harness
+    timer = setTimeout(() => void failAndClose(run, 'RUNTIME_TIMEOUT'), runTimeoutMs)
+    timer.unref()
+    progressTimer = setInterval(() => {
+      if (isActive(run.status) && Date.now() - run.lastProgressAt >= noProgressTimeoutMs) {
+        void failAndClose(run, 'MODEL_NO_PROGRESS')
+      }
+    }, 1000)
+    progressTimer.unref()
+    if (!isActive(run.status)) return
     let result = await harness.run(conversationPrompt(request), {
       sessionId: request.sessionId,
       onNotification: notification => projectNotification(run, notification),
@@ -227,8 +233,8 @@ async function execute(run: RuntimeRun, request: CreateRunRequest): Promise<void
       log('run.failed', { runId: run.id, code: 'RUNTIME_ERROR', message: run.error, stack: safeStack(error) })
     }
   } finally {
-    clearTimeout(timer)
-    clearInterval(progressTimer)
+    if (timer) clearTimeout(timer)
+    if (progressTimer) clearInterval(progressTimer)
     await cleanup(run)
   }
 }
