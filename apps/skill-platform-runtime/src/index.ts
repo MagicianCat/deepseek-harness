@@ -418,8 +418,10 @@ function buildIntentPrompt(plan: IntentPlan): string {
     ...plan.policyKeys.map(key => policies[key]).filter((value): value is string => Boolean(value)),
     plan.recommendSkills ? '本轮允许推荐 Skill。' : '本轮禁止输出 Skill 推荐、Skill 卡片和调用 submit_skill_recommendation；即使检索结果有 linkedSkills 也不得转成推荐。',
     '资源请求先调用 search_knowledge，query 使用用户本轮完整需求。结果不足时再使用 search_wiki_documents；命中父 Wiki 时检查 childDocuments，目录截断则说明不完整，必要时读取相关子文档。',
+    '调用 search_knowledge 时，可按问题明确主题附带 knowledgeCategory：Skill、ASDM 工具或命令用 SKILL_TOOL；项目背景或约束用 PROJECT_CONTEXT；企业通用规范用 INTERNAL_KNOWLEDGE；其他用 OTHER。仅把类别作为 PREFER 偏好，结果不足时允许跨类检索；用户明确要求“只查某类”才用 STRICT。多主题或不确定时不传类别。分类不授予访问权限。',
     plan.policyKeys.includes('KNOWLEDGE') || plan.status === 'EXPLORE' ? '平台内没有足够知识依据时才检索飞书。' : '本轮资源发现仅使用平台知识、Wiki 及计划允许的 Skill 工具，不检索飞书。',
     '仅在需要安装、参数、步骤或检索片段不足时读取 Skill 或 Wiki 全文。飞书只读取 readable=true 的 DOCX 或 DOC，保险问题必须以平台或飞书资料为依据。',
+    '跟随 search_knowledge 的 PLATFORM 结果读取 Wiki 全文时，调用 get_wiki_document 并传 audience=PLATFORM，保证正文与命中的批准版本一致。',
     'Wiki 引用须使用工具返回的 sourceUrl 和 downloadUrl；ASDM 链接只能使用工具返回的地址。最终用中文回答。',
   ].join('\n')
 }
