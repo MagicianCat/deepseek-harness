@@ -258,7 +258,7 @@ function projectNotification(run: RuntimeRun, notification: HarnessNotification)
       arguments: normalizedArguments,
     })
     if (toolIs(toolName, 'get_current_user_context')) setPhase(run, 'CONTEXT', '正在确认你的团队和知识权限')
-    else if (toolIs(toolName, 'search_knowledge')) setPhase(run, 'SEARCHING_KNOWLEDGE', '正在检索相关研发知识')
+    else if (toolIs(toolName, 'search_knowledge') || toolIs(toolName, 'resolve_external_roles')) setPhase(run, 'SEARCHING_KNOWLEDGE', '正在检索相关研发知识')
     else if (toolIs(toolName, 'search_feishu_documents')) setPhase(run, 'SEARCHING_DOCUMENTS', '正在检索相关飞书文档')
     else if (toolIs(toolName, 'get_feishu_document')) setPhase(run, 'READING_DOCUMENTS', '正在读取可访问的业务资料')
     emit(run, 'tool.started', { callId: event.data?.callId, toolName: event.data?.name, arguments: normalizedArguments })
@@ -417,11 +417,13 @@ function buildIntentPrompt(plan: IntentPlan): string {
     plan.status === 'EXPLORE' ? '本轮意图尚不明确。先检索平台知识，以结果理解用户问题并给出有依据的回答；不要猜测成某个资源请求，也不要主动附加 Skill 推荐。确实缺少必要信息时再简短询问。' : '',
     ...plan.policyKeys.map(key => policies[key]).filter((value): value is string => Boolean(value)),
     plan.recommendSkills ? '本轮允许推荐 Skill。' : '本轮禁止输出 Skill 推荐、Skill 卡片和调用 submit_skill_recommendation；即使检索结果有 linkedSkills 也不得转成推荐。',
-    '资源请求先调用 search_knowledge，query 使用用户本轮完整需求。结果不足时再使用 search_wiki_documents；命中父 Wiki 时检查 childDocuments，目录截断则说明不完整，必要时读取相关子文档。',
+    '指定外部角色的项目背景、技术规约或系统上下文请求，先调用 resolve_external_roles。唯一明确匹配后使用内部 ID 调用 search_knowledge，优先 PROJECT_CONTEXT，用户限定具体角色时用 roleMode=STRICT。同名或模糊匹配请用户确认，不猜测 ID。仅在用户已明确确认且本轮指代该角色时沿用历史角色。角色知识请求按现有意图计划决定是否推荐 Skill。',
+    '严格角色检索无结果时说明没有对应角色证据，roleIndexPending 为真时说明索引仍在同步。除非用户同意放宽范围，严格角色请求不转向飞书、无角色筛选的 Wiki 或其他角色。GENERAL_FALLBACK 只作为通用知识，子 Wiki 的角色以它自己的标签为准。',
+    '一般资源请求先调用 search_knowledge，query 使用用户本轮完整需求。结果不足时再使用 search_wiki_documents；命中父 Wiki 时检查 childDocuments，目录截断则说明不完整，必要时读取相关子文档。',
     '调用 search_knowledge 时，可按问题明确主题附带 knowledgeCategory：Skill、ASDM 工具或命令用 SKILL_TOOL；项目背景或约束用 PROJECT_CONTEXT；企业通用规范用 INTERNAL_KNOWLEDGE；FDE 专区知识用 FDE_WIKI；其他用 OTHER。仅把类别作为 PREFER 偏好，结果不足时允许跨类检索；用户明确要求“只查某类”才用 STRICT。多主题或不确定时不传类别。分类不授予访问权限。',
     plan.policyKeys.includes('KNOWLEDGE') || plan.status === 'EXPLORE' ? '平台内没有足够知识依据时才检索飞书。' : '本轮资源发现仅使用平台知识、Wiki 及计划允许的 Skill 工具，不检索飞书。',
     '仅在需要安装、参数、步骤或检索片段不足时读取 Skill 或 Wiki 全文。飞书只读取 readable=true 的 DOCX 或 DOC，保险问题必须以平台或飞书资料为依据。',
-    '跟随 search_knowledge 的 PLATFORM 结果读取 Wiki 全文时，调用 get_wiki_document 并传 audience=PLATFORM，保证正文与命中的批准版本一致。',
+    '跟随 search_knowledge 的 PLATFORM 结果读取 Wiki 全文时，调用 get_wiki_document 并传 audience=PLATFORM，保证正文与命中的批准版本一致。读严格角色命中时同时传原 externalRoleIds 和 roleMode=STRICT。',
     'Wiki 引用须使用工具返回的 sourceUrl 和 downloadUrl；ASDM 链接只能使用工具返回的地址。最终用中文回答。',
   ].join('\n')
 }
@@ -437,10 +439,24 @@ function validateToolPolicy(run: RuntimeRun, request: CreateRunRequest, answer: 
     return { code: 'USER_CONTEXT_REQUIRED', message: 'Agent did not identify the current user team before answering' }
   }
   const knowledgeIndex = run.toolCalls.findIndex(call => toolIs(call.name, 'search_knowledge'))
-  if (knowledgeIndex < 0) return { code: 'KNOWLEDGE_SEARCH_REQUIRED', message: 'Resource requests must search authorized knowledge first' }
   const resourceIndex = run.toolCalls.findIndex(call => ['search_skills','search_wiki_documents','get_wiki_document','list_wiki_children','submit_skill_recommendation'].some(name => toolIs(call.name,name)))
+  if (knowledgeIndex < 0) {
+    const resolvingRole = run.toolCalls.some(call => toolIs(call.name, 'resolve_external_roles'))
+    const usedFeishu = run.toolCalls.some(call => toolIs(call.name, 'search_feishu_documents') || toolIs(call.name, 'get_feishu_document'))
+    if (resolvingRole && resourceIndex < 0 && !usedFeishu) return undefined
+    return { code: 'KNOWLEDGE_SEARCH_REQUIRED', message: 'Resource requests must search authorized knowledge first' }
+  }
   if (resourceIndex >= 0 && resourceIndex < knowledgeIndex)
     return { code: 'KNOWLEDGE_SEARCH_ORDER', message: 'Knowledge search must precede resource discovery' }
+  const strictSearch = run.toolCalls.find(call => toolIs(call.name, 'search_knowledge') && call.arguments.roleMode === 'STRICT')
+  const roleIds = (value: unknown) => Array.isArray(value) ? JSON.stringify([...value].sort()) : ''
+  if (strictSearch && run.toolCalls.some(call =>
+    ['search_wiki_documents', 'list_wiki_children', 'search_feishu_documents', 'get_feishu_document'].some(name => toolIs(call.name, name))
+    || (['search_knowledge', 'get_wiki_document'].some(name => toolIs(call.name, name))
+        && (call.arguments.roleMode !== 'STRICT'
+            || roleIds(call.arguments.externalRoleIds) !== roleIds(strictSearch.arguments.externalRoleIds))))) {
+    return { code: 'STRICT_ROLE_SCOPE_REQUIRED', message: 'Strict role requests require role-scoped Wiki evidence' }
+  }
   const current = request.messages.at(-1)?.content ?? ''
   if (insuranceIntent(current)) {
     const searchedKnowledge = run.toolCalls.some(call => toolIs(call.name, 'search_knowledge'))
