@@ -426,7 +426,7 @@ function buildIntentPrompt(plan: IntentPlan): string {
     plan.policyKeys.includes('KNOWLEDGE') || plan.status === 'EXPLORE' ? '平台内没有足够知识依据时才检索飞书。' : '本轮资源发现仅使用平台知识、Wiki 及计划允许的 Skill 工具，不检索飞书。',
     '仅在需要安装、参数、步骤或检索片段不足时读取 Skill 或 Wiki 全文。飞书只读取 readable=true 的 DOCX 或 DOC，保险问题必须以平台或飞书资料为依据。',
     '跟随 search_knowledge 的 PLATFORM 结果读取 Wiki 全文时，调用 get_wiki_document 并传 audience=PLATFORM，保证正文与命中的批准版本一致。读严格角色命中时同时传原 externalRoleIds 和 roleMode=STRICT。',
-    'Wiki 引用须使用工具返回的 sourceUrl 和 downloadUrl；ASDM 链接只能使用工具返回的地址。最终用中文回答。',
+    '最终回答面向普通用户，只写资料标题、可读类别和实际结论。省略内部枚举、Wiki/角色/版本/任务 ID、工具名和原始工具参数。Wiki 与 ASDM 引用使用中文链接标题，工具返回的 URL 只放在链接目标中。最终用中文回答。',
   ].join('\n')
 }
 
