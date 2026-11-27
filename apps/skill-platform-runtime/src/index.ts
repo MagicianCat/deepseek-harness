@@ -24,7 +24,8 @@ interface CreateRunRequest {
 interface IntentPlan {
   reviewCandidate?: string
   retrieval?: { tasks?: Array<{ resourceKind: string }> }
-  schemaVersion: 1 | 2
+  schemaVersion: 1 | 2 | 3
+  retrievalState?: 'DISCOVERY' | 'CONFIRMED'
   status: 'READY' | 'EXPLORE'
   intents: string[]
   constraints: string[]
@@ -377,7 +378,7 @@ function conversationPrompt(request: CreateRunRequest): string {
   const current = request.messages.at(-1)?.content ?? ''
   const platform = request.platform || '未选择'
   const osType = request.osType || '未选择'
-  const reminder = request.firstTurn && (!request.platform || !request.osType)
+  const reminder = request.intentPlan.schemaVersion !== 3 && request.firstTurn && (!request.platform || !request.osType)
     ? '这是新会话首轮，并且平台或操作系统尚未选择。请在回答开头简短提醒用户通过页面/卡片选择，或直接在消息中说明；仍可继续回答当前问题。'
     : '无需重复询问运行环境；使用下面的会话筛选执行本轮检索。'
   const trusted = `可信会话筛选（已由后端解析当前轮用户明确要求）：platform=${platform}，osType=${osType}。${reminder}`
@@ -412,6 +413,17 @@ function recommendationRecoveryPrompt(request: CreateRunRequest): string {
 }
 
 function buildIntentPrompt(plan: IntentPlan): string {
+  if (plan.schemaVersion === 3) return [
+    '你是研途助手。直接回答一般常识。平台资料问题先调用 get_current_user_context 和 get_retrieval_plan。小模型提示仅供参考。',
+    '理解用户本轮要找的角色、资源与动作。角色名里的 ASDM、Skill 等词只是名称的一部分。用户查询角色资料时，先用用户原话里的完整角色名称调用 resolve_external_roles，保留名称中的“角色”“项目组”等后缀。例如“兼职asdm开发角色的项目上下文”必须先查“兼职asdm开发角色”。调用工具的 name 必须直接复制用户原话，保留错别字。用户写“兼职asdm开法角色”时，name 和 roleEvidence 都填“兼职asdm开法角色”，让工具返回正确名称；matchMode 用 EXACT_OR_FUZZY。若确认被拒绝，先检查是否把原句中的错字提前改成了正确字，改用原文重新查询。若第一次只查了简称而无法自动确认，改用全称重试。允许近似匹配，最多尝试三次。省略 sourceSystem，除非用户明确给出来源。查 Wiki 或 ASDM 项目上下文不需要先选择平台或操作系统。',
+    '只有唯一且 canAutoConfirm=true 的候选才能自动确认。选择不到时只询问缺少的信息。角色未确认时不搜索普通 Wiki 或飞书，也不使用其他角色替代。',
+    '调用 propose_retrieval_tasks，传入当前 revision 和 tasks。每项包括 taskId（如 t1）、resourceKind、strategy、actionEvidence。新查角色的任务填写 roleId、resolutionId、roleEvidence。引用上轮资源的任务使用 referenceId 代替 resolutionId。按需传 category 和 categoryEvidence。所有证据必须逐字引用本轮用户原话，角色证据包含用于查找的片段，动作和分类证据须在角色名称以外。禁止虚构证据。键名严格按工具参数：例如 {revision:1,tasks:[{taskId:"t1",roleId:角色候选的数字id,resolutionId:"本轮角色工具返回的值",resourceKind:"DOCUMENT",strategy:"CATALOG",roleEvidence:"兼职asdm开发角色",actionEvidence:"分析一下",category:"PROJECT_CONTEXT",categoryEvidence:"项目上下文"}]}。示例只展示目录请求参数，必须根据当前需求重选 strategy。请替换所有示例值。提案失败先修正报错或读取最新计划，最多重试一次。',
+    '查找某角色的上下文或项目背景时使用 DOCUMENT、PROJECT_CONTEXT 和 CATALOG。只在用户要浏览资料本身时选择 CATALOG。用户问资料中的规定、某个字段要写什么、某项设计如何实现或要求引用原文时，选择 DOCUMENT + SEMANTIC，先检索再精读相关条目并回答问题。没有明确资料分类时省略 category 与 categoryEvidence，文档标题或业务主题不是知识分类。search_knowledge 未召回明确文档时，用 search_wiki_documents 传相同 taskId 和标题关键词，然后 get_wiki_document 精读。例如“投监项目组的测试用例里前置条件要写什么”需要 SEMANTIC。角色全部 Skill 用 SKILL 和 CATALOG。用户明确要求安装或下载 ASDM 工具时用 resourceKind="ASDM-TOOL"、strategy="CATALOG"，省略 category、categoryEvidence 和 stage，逐字引用“安装”或“下载”作为 actionEvidence。工具目录提供实际下载链接。角色原名里只有 ASDM 而用户索要项目上下文时仍用 DOCUMENT。明确要求推荐时用 RECOMMEND 和 SEMANTIC，填写用户请求证据和对应 stage。涉及明确知识分类可用 CATEGORY 或 CATEGORY_PREFER 和 SEMANTIC。',
+    '追问刚才的资料时，只使用 get_retrieval_plan 返回的 trustedReferences。提案传 referenceId、对应 roleId 和逐字引用的指代（例如“刚才那个角色”“第一个 Skill”），省略 resolutionId。指向已展示的一个 Skill 用 SKILL_READ + SEMANTIC。例：“第一个 Skill 怎么用？”先从 trustedReferences 找 kind=SKILL 且 ordinal=1 的记录，tasks 写 {taskId:"t1",resourceKind:"SKILL_READ",strategy:"SEMANTIC",roleId:该记录的roleId,referenceId:该记录的referenceId,roleEvidence:"第一个 Skill",actionEvidence:"怎么用"}；不要把 objectId 或 ordinal 当成 referenceId，也不要重查角色。确认成功后按计划返回的 skillKey 和版本调用 get_skill_detail。追问“这篇”时使用 DOCUMENT + SEMANTIC，直接读取已绑定的 Wiki。证据不足或多个目标时只问一句。用户明确换角色时重新解析新角色，沿用此前的资源类型仅限用户仍在追问该资源。',
+    '比较多个角色、同时查文档和 Skill 或同时要目录和推荐时，在同一提案中为各目标提供独立任务，每项分别绑定角色和证据。逐个读取对应 taskId。推荐句没有指定角色时 roleId 填 0，省略 resolutionId、roleEvidence。比如“投监项目组的上下文，再推荐适合后端开发的 Skill”，首项限投监角色，第二项按后端研发阶段推荐；不要继承首项角色。同一 Wiki 可以在多个角色下出现，但正文总结只引用一次。用户明确排除的角色或资源不能进入任务。',
+    '确认后使用返回的 taskId。CATALOG 调用 list_knowledge_catalog，SEMANTIC 调用 search_knowledge；语义索引未就绪时使用返回的同范围目录，按需读取正文并传对应 audience 和 versionId。使用受限范围内的真实文档与链接。推荐任务先 search_skills，再用同一 taskId 提交。',
+    '遇到计划版本冲突时重新读取计划。若不能确认范围，简短说明缺少的信息。纠正角色错字后在答案里写实际角色名。如果同名需要问来源，只展示人可读的来源名称，省略来源系统代码。只展示可读名称、资料标题和结论，隐藏内部 ID、枚举及工具字段。',
+  ].join('\n')
   const policies: Record<string,string> = {
     SKILL: '先调用 search_knowledge 检索用户需求及其 Wiki 关联 Skill；关联候选不足时再调用 search_skills。推荐前必须调用 submit_skill_recommendation，最多 20 项。',
     WIKI: '优先检索平台知识和 Wiki，检查子文档目录，按需读取正文，只输出真实的 Wiki 或 ASDM 链接。',
@@ -438,6 +450,7 @@ function buildIntentPrompt(plan: IntentPlan): string {
 }
 
 function validateToolPolicy(run: RuntimeRun, request: CreateRunRequest, answer: string): { code: string; message: string } | undefined {
+  if (request.intentPlan.schemaVersion === 3) return undefined
   if (request.intentPlan.recommendSkills && !run.toolCalls.some(call => toolIs(call.name, 'submit_skill_recommendation')))
     return { code: 'SKILL_RECOMMENDATION_NOT_SUBMITTED', message: 'Skill recommendation was requested but not submitted' }
   if (!request.intentPlan.recommendSkills && run.toolCalls.some(call => toolIs(call.name, 'submit_skill_recommendation')))
@@ -507,7 +520,8 @@ function validateCreateRun(value: unknown): CreateRunRequest {
   const plan = body.intentPlan
   const validPolicies = new Set(['SKILL','WIKI','KNOWLEDGE','CHAT'])
   const validArtifacts = new Set(['SKILL','WIKI_DOCUMENT','ASDM_PACKAGE_LINK','ANSWER','SOURCE_LINK','WIKI_CATALOG','SKILL_CATALOG','ASDM_CATALOG'])
-  if (!plan || ![1,2].includes(plan.schemaVersion) || !['READY','EXPLORE'].includes(plan.status) || !Array.isArray(plan.intents) || (plan.status === 'READY' && plan.intents.length === 0) || (plan.status === 'EXPLORE' && plan.intents.length !== 0) || plan.intents.length > 32 || !plan.intents.every(x => typeof x === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(x))) throw new Error('invalid intentPlan.intents')
+  if (!plan || ![1,2,3].includes(plan.schemaVersion) || !['READY','EXPLORE'].includes(plan.status) || !Array.isArray(plan.intents) || (plan.status === 'READY' && plan.intents.length === 0) || (plan.status === 'EXPLORE' && plan.intents.length !== 0) || plan.intents.length > 32 || !plan.intents.every(x => typeof x === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/.test(x))) throw new Error('invalid intentPlan.intents')
+  if (plan.schemaVersion === 3 && (plan.status !== 'EXPLORE' || plan.retrievalState !== 'DISCOVERY')) throw new Error('invalid discovery plan')
   if (!Array.isArray(plan.policyKeys) || plan.policyKeys.length > 4 || !plan.policyKeys.every(x => validPolicies.has(x))) throw new Error('invalid intentPlan.policyKeys')
   if (!Array.isArray(plan.allowedArtifacts) || plan.allowedArtifacts.length > 5 || !plan.allowedArtifacts.every(x => validArtifacts.has(x))) throw new Error('invalid intentPlan.allowedArtifacts')
   if (!Array.isArray(plan.constraints) || plan.constraints.length > 4 || !plan.constraints.every(x => x === 'EXCLUDE_SKILL_OUTPUT')) throw new Error('invalid intentPlan.constraints')
