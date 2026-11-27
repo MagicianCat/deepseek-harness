@@ -1,0 +1,21 @@
+# Restrictive SDK profile for the Skill platform. The run-scoped MCP token and
+# the model credential are supplied only through the child process environment.
+- id: llm-deepseek
+  config:
+    baseURL: !!js process.env.DEEPSEEK_BASE_URL ?? 'https://tkcopilot.taikang.com/v1/deepseek'
+    apiKeyEnv: DEEPSEEK_API_KEY
+    defaultContextWindow: 1000000
+    reasoningEffort: !!js process.env.DSH_REASONING_EFFORT ?? 'low'
+    maxTokens: !!js Number(process.env.DSH_MAX_TOKENS ?? 16384)
+    retryPolicy:
+      mode: normal
+      maxRetries: 1
+
+- id: persistent-bash
+  disabled: true
+
+- id: persistent-pwsh
+  disabled: true
+
+- id: str-replace-editor
+  disabled: true
